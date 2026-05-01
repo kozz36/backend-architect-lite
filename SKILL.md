@@ -225,7 +225,7 @@ Refresh token: long-lived (7–30 days), stored in DB, rotated on use
 ```python
 # FastAPI JWT pattern — HMAC (default, safest for single-service)
 from datetime import datetime, timedelta, UTC
-import jwt, os
+import jwt, os, secrets
 
 SECRET_KEY = os.environ["JWT_SECRET_KEY"]  # 32+ bytes for HS256
 ALGORITHM = "HS256"
@@ -333,15 +333,19 @@ Tag-based:        tag cache keys by entity, flush by tag — good for related da
 
 ```python
 # Cache-Aside pattern with FastAPI + Redis
-async def get_user(user_id: UUID, redis: Redis, db: AsyncSession) -> User:
+# NOTE: UserDTO is a Pydantic model (serialization layer). Never cache SQLAlchemy ORM objects directly.
+import json
+
+async def get_user(user_id: UUID, redis: Redis, db: AsyncSession) -> UserDTO:
     cache_key = f"user:{user_id}"
     cached = await redis.get(cache_key)
     if cached:
-        return User.model_validate_json(cached)
+        return UserDTO.model_validate_json(cached)
 
     user = await UserRepository(db).get_by_id(user_id)
     if user:
-        await redis.setex(cache_key, 300, user.model_dump_json())  # TTL: 5 min
+        dto = UserDTO.model_validate(user)
+        await redis.setex(cache_key, 300, dto.model_dump_json())  # TTL: 5 min
     return user
 ```
 
@@ -369,8 +373,9 @@ USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
 -- Semantic search query
--- NOTE: <> returns cosine DISTANCE (0 = identical, 2 = opposite).
--- For normalized vectors, 1 - distance gives [0,1] similarity.
+-- NOTE: <=> returns cosine DISTANCE (0 = identical, 2 = opposite).
+-- Cosine similarity of normalized vectors is in [-1, 1].
+-- Use 1 - distance only if you know vectors are normalized; otherwise use distance directly.
 -- If vectors aren't normalized, use distance directly and ORDER BY ascending.
 SELECT id, content, 1 - (embedding <=> query_embedding) AS similarity
 FROM documents
@@ -483,7 +488,7 @@ Rule: start with Redis Streams. Migrate to Kafka when you need replay, audit log
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
 
-broker = RedisBroker(url="redis://localhost:6379")
+broker = RedisBroker(host="localhost", port=6379, db=0)
 dramatiq.set_broker(broker)
 
 @dramatiq.actor(max_retries=3, min_backoff=1000)
